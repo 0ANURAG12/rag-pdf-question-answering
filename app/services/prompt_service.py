@@ -1,0 +1,34 @@
+"""
+Stage 6: Prompt construction.
+
+Combines the retrieved chunks with the user's question into a single
+prompt that instructs the LLM to answer only from the given context,
+which is what keeps the system's answers grounded in the retrieved
+evidence instead of the model's own memory.
+"""
+
+from typing import List, Dict, Any
+
+_PROMPT_TEMPLATE = """Answer only from the provided context.
+
+If the answer is not in the context, reply exactly:
+"I could not find this information in the uploaded documents."
+
+Do not guess.
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer:"""
+
+
+def build_prompt(question: str, chunks: List[Dict[str, Any]]) -> str:
+    context_blocks = [
+        f"[Source: {chunk['source']} | Chunk: {chunk['chunk_index']}]\n{chunk['content']}"
+        for chunk in chunks
+    ]
+    context = "\n\n".join(context_blocks)
+    return _PROMPT_TEMPLATE.format(context=context, question=question)
