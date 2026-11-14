@@ -57,6 +57,10 @@ The entire AI pipeline runs locally on your machine:
 - **Hallucination Prevention** — The LLM is instructed to only answer from context; returns empty sources if nothing is found
 - **Source References** — Every answer includes the exact chunks that were used to produce it
 - **No API Keys Required** — Everything runs locally; no cloud services, no subscriptions
+- **Structured Logging** — Single-line, request-correlated logs on every ingestion and query
+- **Deep Health Check** — `GET /health/deep` verifies Ollama and ChromaDB are reachable, not just the web server
+- **File Validation** — Rejects non-PDF uploads and corrupted PDFs with clear 400 errors
+- **Tightened CORS** — Only origins listed in `ALLOWED_ORIGINS` may call the API
 - **Single-Document Design** — One active PDF at a time; uploading a new PDF replaces the previous one
 
 ---
@@ -123,7 +127,7 @@ Ollama is a tool that runs large language models locally on your machine.
 It was chosen because:
 - No API key or internet connection is required.
 - Models run on your own hardware — data stays private.
-- It exposes a simple HTTP API (`/api/generate`) that is easy to call with `requests`.
+- It exposes a simple HTTP API (`/api/generate`) that is easy to call with `httpx`.
 - Switching models is a one-line config change.
 
 ### Why ChromaDB?
@@ -177,10 +181,11 @@ This produces semantically coherent chunks rather than cutting text at arbitrary
 ai-service/
 │
 ├── app/
-│   ├── main.py                  # FastAPI app, middleware, route registration
+│   ├── main.py                  # FastAPI app, middleware, request IDs, route registration
 │   ├── config.py                # All settings loaded from .env
 │   ├── exceptions.py            # Custom exceptions and error handlers
 │   ├── schemas.py               # Request/response data models
+│   ├── logging_config.py        # Structured single-line / JSON logging setup
 │   │
 │   ├── routes/
 │   │   ├── ingest.py            # POST /api/ingest — PDF upload endpoint
@@ -198,6 +203,7 @@ ai-service/
 ├── chroma_data/                 # ChromaDB persisted storage (auto-created)
 ├── .env                         # Your local configuration (not committed)
 ├── .env.example                 # Template showing all available config keys
+├── run.sh                       # One-command launcher (activates venv, starts server)
 ├── requirements.txt             # Python dependencies
 └── README.md                    # This file
 ```
@@ -207,9 +213,11 @@ ai-service/
 ## 7. File Responsibilities
 
 ### `app/main.py`
-Creates the FastAPI application. Registers CORS middleware (so Spring Boot and browsers can call it),
-registers custom exception handlers, and includes the two API routers.
-Also exposes `GET /health` for uptime checks.
+Creates the FastAPI application. Sets up structured logging, registers CORS middleware
+(restricted to the origins in `ALLOWED_ORIGINS`), adds a request-ID middleware that tags every
+request with an `X-Request-Id` header and logs it, registers custom exception handlers, and
+includes the two API routers. Exposes `GET /health` for uptime checks and `GET /health/deep`
+which also verifies Ollama and ChromaDB are reachable. Closes the shared httpx client on shutdown.
 
 ### `app/config.py`
 Reads all configuration from environment variables or `.env`.
@@ -217,8 +225,9 @@ Creates a single `settings` object used across the entire app.
 Covers: ChromaDB path, collection name, embedding model, chunk size, chunk overlap, top_k, Ollama URL, model name, and timeout.
 
 ### `app/exceptions.py`
-Defines three custom exceptions:
+Defines four custom exceptions:
 - `EmptyDocumentError` — PDF has no extractable text.
+- `InvalidPdfError` — Uploaded file is not a readable PDF (wrong type, bad magic bytes, or corrupted).
 - `NoDocumentsIndexedError` — Query attempted before any PDF was uploaded.
 - `OllamaServiceError` — Ollama is unreachable or returned an empty response.
 
@@ -267,8 +276,10 @@ Coordinates retrieval: checks that documents exist, resolves `top_k` (uses confi
 Builds the prompt sent to Ollama. Each retrieved chunk is labelled with its source file and chunk index. The LLM is explicitly instructed to answer only from the provided context and to say "I could not find this information in the uploaded documents." if the answer is not present.
 
 ### `app/services/llm_service.py`
-Sends the prompt to Ollama's `POST /api/generate` endpoint with `stream: false`.
-Raises `OllamaServiceError` if the request fails or the response is empty.
+Sends the prompt to Ollama's `POST /api/generate` endpoint with `stream: false` using a shared
+`httpx.AsyncClient` (non-blocking, so the FastAPI event loop is never held up). Also exposes
+`list_models()` for health checks. Raises `OllamaServiceError` if the request fails or the
+response is empty.
 
 ---
 
@@ -579,6 +590,8 @@ file: <PDF file>
 ```
 
 **Errors:**
+- `400` — Uploaded file is not a PDF (wrong MIME type or missing `%PDF-` magic bytes).
+- `400` — PDF is corrupted or unreadable.
 - `400` — PDF contains no extractable text (scanned image without text layer).
 
 ---
@@ -596,6 +609,7 @@ Ask a question about the uploaded document.
 ```
 
 `top_k` is optional. If omitted or `<= 0`, the config default (4) is used.
+`question` is limited to 2000 characters; `top_k` must be between 1 and 50.
 
 **Response (answer found):**
 ```json
@@ -605,11 +619,14 @@ Ask a question about the uploaded document.
     {
       "content": "Phase 2 focused on automation which reduced costs by 20%...",
       "source": "report.pdf",
-      "chunk_index": 3
+      "chunk_index": 3,
+      "distance": 1.31
     }
   ]
 }
 ```
+
+Every response also carries an `X-Request-Id` header for tracing the request through the logs.
 
 **Response (answer not found):**
 ```json
@@ -632,6 +649,24 @@ Check if the service is running.
 **Response:**
 ```json
 { "status": "ok" }
+```
+
+### `GET /health/deep`
+
+Check that every dependency the service relies on is reachable — the local
+Ollama server and the ChromaDB store. Returns `200` when all dependencies
+are healthy, `503` when any are not, with a per-dependency status in the
+body.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "dependencies": {
+    "ollama": { "models": ["llama3.2:latest", "nomic-embed-text:latest"] },
+    "chromadb": { "document_count": 10 }
+  }
+}
 ```
 
 ---
@@ -685,6 +720,11 @@ Then start the FastAPI service:
 uvicorn app.main:app --reload --port 8000
 ```
 
+Or use the bundled launcher (activates the venv, installs deps, starts on port 8000):
+```bash
+./run.sh
+```
+
 The service starts at: `http://localhost:8000`
 
 Swagger UI (interactive API docs): `http://localhost:8000/docs`
@@ -736,6 +776,9 @@ All values can be set in `.env` or as environment variables.
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `llama3.2:latest` | Model name to use for generation |
 | `OLLAMA_TIMEOUT_SECONDS` | `120` | Request timeout for Ollama calls |
+| `ALLOWED_ORIGINS` | `http://localhost:8080` | Comma-separated list of CORS origins allowed to call the API |
+| `LOG_LEVEL` | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `JSON_LOGS` | `false` | Set to `true` to emit single-line JSON logs for log aggregators |
 
 ---
 
@@ -747,7 +790,7 @@ These are known limitations of the current implementation:
 - **No OCR support** — Scanned PDFs (images of text without a selectable text layer) cannot be processed. The service will return an error for these files.
 - **Local execution only** — The LLM runs through Ollama on your local machine. The service does not support cloud-hosted models out of the box.
 - **Retrieval quality depends on PDF text quality** — If the PDF has poor formatting, unusual encoding, or complex multi-column layouts, the extracted text may be incomplete or incorrectly ordered, which reduces answer quality.
-- **File validation is minimal** — The service expects PDF documents. Invalid or unsupported files will fail during processing.
+- **File validation is minimal** — The service checks the MIME type and PDF magic bytes, but does not verify that the PDF is structurally valid beyond what PyPDF can read. Corrupted PDFs are rejected with a clear 400 error.
 
 ---
 

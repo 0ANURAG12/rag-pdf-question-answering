@@ -9,6 +9,9 @@ from typing import List
 from sentence_transformers import SentenceTransformer
 
 from app.config import settings
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 _model = SentenceTransformer(settings.embedding_model)
 
@@ -16,6 +19,10 @@ _model = SentenceTransformer(settings.embedding_model)
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """Embed a batch of document chunks (used during ingestion)."""
     vectors = _model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+    logger.info(
+        "embedding.embed_texts",
+        extra={"texts": len(texts), "dimensions": vectors.shape[1]},
+    )
     return vectors.tolist()
 
 

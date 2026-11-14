@@ -9,6 +9,10 @@ evidence instead of the model's own memory.
 
 from typing import List, Dict, Any
 
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 _PROMPT_TEMPLATE = """Answer only from the provided context.
 
 If the answer is not in the context, reply exactly:
@@ -31,4 +35,8 @@ def build_prompt(question: str, chunks: List[Dict[str, Any]]) -> str:
         for chunk in chunks
     ]
     context = "\n\n".join(context_blocks)
+    logger.info(
+        "prompt.build_prompt",
+        extra={"question_length": len(question), "chunks_count": len(chunks)},
+    )
     return _PROMPT_TEMPLATE.format(context=context, question=question)

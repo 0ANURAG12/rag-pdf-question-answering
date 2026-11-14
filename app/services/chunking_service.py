@@ -12,6 +12,9 @@ from typing import List
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.config import settings
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 _splitter = RecursiveCharacterTextSplitter(
     chunk_size=settings.chunk_size,
@@ -23,4 +26,14 @@ _splitter = RecursiveCharacterTextSplitter(
 def split_text(text: str) -> List[str]:
     """Split a document's text into a list of chunk strings."""
     chunks = _splitter.split_text(text)
-    return [chunk.strip() for chunk in chunks if chunk.strip()]
+    chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
+    logger.info(
+        "chunking.split_text",
+        extra={
+            "input_chars": len(text),
+            "chunks_created": len(chunks),
+            "chunk_size": settings.chunk_size,
+            "chunk_overlap": settings.chunk_overlap,
+        },
+    )
+    return chunks

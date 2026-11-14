@@ -12,6 +12,9 @@ from typing import List, Dict, Any
 import chromadb
 
 from app.config import settings
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 _client = chromadb.PersistentClient(path=settings.chroma_dir)
 _collection = _client.get_or_create_collection(name=settings.collection_name)
@@ -34,6 +37,15 @@ def add_chunks(chunks: List[str], embeddings: List[List[float]], source: str) ->
         documents=chunks,
         metadatas=metadatas,
     )
+
+    logger.info(
+        "vectorstore.add_chunks",
+        extra={
+            "chunks_added": len(chunks),
+            "source": source,
+            "collection": settings.collection_name,
+        },
+    )
     return len(chunks)
 
 
@@ -51,6 +63,15 @@ def query(query_embedding: List[float], top_k: int) -> List[Dict[str, Any]]:
     metadatas = results["metadatas"][0]
     distances = results["distances"][0]
 
+    logger.info(
+        "vectorstore.query",
+        extra={
+            "top_k": top_k,
+            "returned": len(documents),
+            "collection": settings.collection_name,
+        },
+    )
+
     return [
         {
             "content": documents[i],
@@ -64,3 +85,8 @@ def query(query_embedding: List[float], top_k: int) -> List[Dict[str, Any]]:
 
 def has_documents() -> bool:
     return _collection.count() > 0
+
+
+def count_documents() -> int:
+    """Number of chunks currently indexed (used by /health/deep)."""
+    return _collection.count()

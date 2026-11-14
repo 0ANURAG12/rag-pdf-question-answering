@@ -15,14 +15,15 @@ class IngestResponse(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=1)
-    top_k: Optional[int] = None
+    question: str = Field(..., min_length=1, max_length=2000)
+    top_k: Optional[int] = Field(default=None, ge=1, le=50)
 
 
 class SourceChunk(BaseModel):
     content: str
     source: str
     chunk_index: int
+    distance: Optional[float] = None
 
 
 class QueryResponse(BaseModel):

@@ -11,6 +11,10 @@ class EmptyDocumentError(Exception):
     """Raised when a PDF contains no extractable text."""
 
 
+class InvalidPdfError(Exception):
+    """Raised when the uploaded file is not a valid or readable PDF."""
+
+
 class NoDocumentsIndexedError(Exception):
     """Raised when a query is made before any document has been ingested."""
 
@@ -22,6 +26,10 @@ class OllamaServiceError(Exception):
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(EmptyDocumentError)
     async def empty_document_handler(request: Request, exc: EmptyDocumentError):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(InvalidPdfError)
+    async def invalid_pdf_handler(request: Request, exc: InvalidPdfError):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     @app.exception_handler(NoDocumentsIndexedError)

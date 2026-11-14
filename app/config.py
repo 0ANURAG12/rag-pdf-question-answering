@@ -28,6 +28,18 @@ class Settings(BaseSettings):
     ollama_model: str = "llama3.2:latest"
     ollama_timeout_seconds: int = 120
 
+    # CORS — restrict to the origins that actually call this service.
+    # Comma-separated list, e.g. "http://localhost:8080,http://localhost:3000"
+    allowed_origins: str = "http://localhost:8080"
+
+    # Logging
+    log_level: str = "INFO"
+    json_logs: bool = False
+
+    # Validation bounds
+    max_question_length: int = 2000
+    max_top_k: int = 50
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
