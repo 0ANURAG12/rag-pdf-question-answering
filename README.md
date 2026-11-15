@@ -63,6 +63,7 @@ The entire AI pipeline runs locally on your machine:
 - **File Validation** — Rejects non-PDF uploads and corrupted PDFs with clear 400 errors
 - **Tightened CORS** — Only origins listed in `ALLOWED_ORIGINS` may call the API
 - **Lazy model loading** — The embedding model (`all-MiniLM-L6-v2`) is loaded on first request, not at server startup
+- **Cross-Encoder Reranking** — Retrieved chunks are rescored by a cross-encoder for higher precision
 - **Single-Document Design** — One active PDF at a time; uploading a new PDF replaces the previous one
 
 ---
@@ -199,6 +200,7 @@ ai-service/
 │       ├── embedding_service.py # Stage 3: Convert text to embeddings
 │       ├── vectorstore_service.py # Stage 4: Store and search embeddings in ChromaDB
 │       ├── retrieval_service.py # Stage 5: Find relevant chunks for a question
+│       ├── rerank_service.py    # Stage 5b: Rerank candidates by question–chunk relevance
 │       ├── prompt_service.py    # Stage 6: Build the prompt for the LLM
 │       └── llm_service.py       # Stage 7: Send prompt to Ollama, return answer
 │
@@ -272,7 +274,10 @@ Provides two functions:
 Manages ChromaDB. On ingestion: clears the entire collection first (single-document design), then adds new chunks with UUID identifiers and metadata (source filename, chunk index). On query: searches for the `top_k` most similar chunks using cosine similarity.
 
 ### `app/services/retrieval_service.py`
-Coordinates retrieval: checks that documents exist, resolves `top_k` (uses config default if not provided or if `<= 0`), embeds the question, and calls the vector store.
+Coordinates retrieval: checks that documents exist, resolves `top_k` (uses config default if not provided or if `<= 0`), embeds the question, fetches extra candidates from the vector store, and passes them through the reranker.
+
+### `app/services/rerank_service.py`
+Rescores the candidate chunks with a cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`) that scores each (question, chunk) pair jointly, then keeps only the `top_k` most relevant. This catches chunks the bi-encoder missed because they only match the question in combination with other words. Falls back to the original retrieval order if the reranker fails, so retrieval never breaks because of reranking. Disabled entirely when `RERANK_ENABLED=false`.
 
 ### `app/services/prompt_service.py`
 Builds the prompt sent to Ollama. Each retrieved chunk is labelled with its source file and chunk index. The LLM is explicitly instructed to answer only from the provided context and to say "I could not find this information in the uploaded documents." if the answer is not present.
@@ -425,6 +430,8 @@ Both chunks now carry enough context for the retrieval to find them.
 **Why it is necessary:** Sending all chunks to the LLM would be slow and exceed the model's context limit. Retrieval selects only the most relevant pieces.
 
 **top_k:** Controls how many chunks are retrieved. Default is 4 (from config). Can be overridden per request. If the provided value is `<= 0` or not provided, the config default is used.
+
+**Reranking:** Retrieval first fetches more candidates than needed (default 12), then `rerank_service.py` rescores each (question, chunk) pair with a cross-encoder and keeps only the `top_k` most relevant. The bi-encoder used for retrieval encodes the question and each chunk independently, so it can miss chunks that only match the question in combination with other words. The cross-encoder scores them jointly, which is far more accurate — at the cost of speed, which is why it only runs on the small candidate set.
 
 **What is Semantic Search?**
 Traditional keyword search looks for exact word matches. If your document says "cost reduction" and you search for "saving money", a keyword search finds nothing.
@@ -775,12 +782,17 @@ All values can be set in `.env` or as environment variables.
 | `CHUNK_SIZE` | `500` | Max characters per chunk |
 | `CHUNK_OVERLAP` | `50` | Characters shared between adjacent chunks |
 | `TOP_K` | `4` | Default number of chunks to retrieve |
+| `RERANK_ENABLED` | `true` | Whether to rerank retrieved candidates with a cross-encoder |
+| `RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model used for reranking |
+| `RERANK_CANDIDATES` | `12` | Number of candidates retrieved before reranking |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `llama3.2:latest` | Model name to use for generation |
 | `OLLAMA_TIMEOUT_SECONDS` | `120` | Request timeout for Ollama calls |
 | `ALLOWED_ORIGINS` | `http://localhost:8080` | Comma-separated list of CORS origins allowed to call the API |
 | `LOG_LEVEL` | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `JSON_LOGS` | `false` | Set to `true` to emit single-line JSON logs for log aggregators |
+| `OLLAMA_MAX_RETRIES` | `2` | Retries for Ollama generation before failing |
+| `OLLAMA_BASE_BACKOFF_SECONDS` | `2.0` | Base backoff seconds (doubles each retry) |
 
 ---
 
