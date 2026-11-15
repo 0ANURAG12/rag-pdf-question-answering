@@ -9,9 +9,32 @@ from pydantic import BaseModel, Field
 
 
 class IngestResponse(BaseModel):
+    """Deprecated synchronous response kept for reference; ingestion is now async."""
+
     filename: str
     chunks_added: int
     message: str
+
+
+class IngestJobResponse(BaseModel):
+    """Returned by POST /api/ingest — the upload was accepted as a background job."""
+
+    job_id: str
+    filename: str
+    status: str
+    message: str
+
+
+class IngestJobStatus(BaseModel):
+    """Returned by GET /api/ingest/{job_id} — current state of the job."""
+
+    job_id: str
+    filename: str
+    status: str
+    chunks_added: Optional[int] = None
+    error: Optional[str] = None
+    created_at: float
+    updated_at: float
 
 
 class QueryRequest(BaseModel):
@@ -24,8 +47,10 @@ class SourceChunk(BaseModel):
     source: str
     chunk_index: int
     distance: Optional[float] = None
+    cited: Optional[bool] = None
 
 
 class QueryResponse(BaseModel):
     answer: str
     sources: List[SourceChunk]
+    citations: Optional[List[SourceChunk]] = None

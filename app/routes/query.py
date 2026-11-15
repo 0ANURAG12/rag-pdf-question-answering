@@ -3,7 +3,7 @@ POST /api/query
 
 Accepts a question and runs it through the full retrieval-generation
 pipeline: retrieve relevant chunks -> build prompt -> ask Ollama ->
-return the answer together with the chunks that supported it.
+extract citations -> return the answer with the chunks that supported it.
 """
 
 from fastapi import APIRouter
@@ -11,7 +11,7 @@ from fastapi import APIRouter
 from app.config import settings
 from app.logging_config import get_logger
 from app.schemas import QueryRequest, QueryResponse, SourceChunk
-from app.services import retrieval_service, prompt_service, llm_service
+from app.services import retrieval_service, prompt_service, llm_service, citation_service
 
 router = APIRouter()
 
@@ -37,17 +37,38 @@ async def ask_question(payload: QueryRequest):
     # If LLM indicates no relevant information was found, return empty sources
     if answer.strip() == _NOT_FOUND_MESSAGE:
         sources = []
+        citations = []
     else:
+        marked = citation_service.mark_cited_sources(answer, chunks)
         sources = [
             SourceChunk(
                 content=chunk["content"],
                 source=chunk["source"],
                 chunk_index=chunk["chunk_index"],
                 distance=chunk.get("distance"),
+                cited=chunk.get("cited"),
             )
-            for chunk in chunks
+            for chunk in marked
+        ]
+        # Citations: only the sources that actually contributed to the answer.
+        citations = [
+            SourceChunk(
+                content=chunk["content"],
+                source=chunk["source"],
+                chunk_index=chunk["chunk_index"],
+                distance=chunk.get("distance"),
+                cited=True,
+            )
+            for chunk in citation_service.filter_cited(marked)
         ]
 
-    logger.info("query.end", extra={"answer_length": len(answer), "sources_returned": len(sources)})
+    logger.info(
+        "query.end",
+        extra={
+            "answer_length": len(answer),
+            "sources_returned": len(sources),
+            "citations_returned": len(citations),
+        },
+    )
 
-    return QueryResponse(answer=answer, sources=sources)
+    return QueryResponse(answer=answer, sources=sources, citations=citations)

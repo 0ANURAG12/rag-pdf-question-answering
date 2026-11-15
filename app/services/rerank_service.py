@@ -38,7 +38,7 @@ def rerank(question: str, chunks: List[Dict[str, Any]], top_k: int) -> List[Dict
     the top_k chunks sorted by relevance. Falls back to the input order if
     the reranker fails, so retrieval never breaks because of reranking.
     """
-    if not settings.rerank_enabled or not chunks or top_k >= len(chunks):
+    if not settings.rerank_enabled or not chunks:
         return chunks
 
     try:

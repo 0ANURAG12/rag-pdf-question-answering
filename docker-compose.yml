@@ -1,0 +1,51 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      # The ollama CLI exits non-zero when it cannot reach the local server,
+      # so this probes the real service without needing curl in the image.
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - "until ollama list >/dev/null 2>&1; do sleep 1; done; ollama pull llama3.2:latest"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: "no"
+
+  ai-service:
+    build: .
+    container_name: ai-service
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - CHROMA_DIR=/data/chroma
+    volumes:
+      - chroma_data:/data/chroma
+      - hf_cache:/data/hf
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+volumes:
+  ollama_data:
+  chroma_data:
+  hf_cache:

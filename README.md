@@ -56,6 +56,7 @@ The entire AI pipeline runs locally on your machine:
 - **Retrieval-Augmented Generation (RAG)** — Grounds every answer in the actual document content
 - **Hallucination Prevention** — The LLM is instructed to only answer from context; returns empty sources if nothing is found
 - **Source References** — Every answer includes the exact chunks that were used to produce it
+- **Inline Citations** — The LLM tags each claim with `[Cite: <source> | Chunk: <index>]`; the API returns only the chunks that actually contributed, separate from everything that was merely retrieved
 - **No API Keys Required** — Everything runs locally; no cloud services, no subscriptions
 - **Structured Logging** — Single-line, request-correlated logs on every ingestion and query
 - **Deep Health Check** — `GET /health/deep` verifies Ollama and ChromaDB are reachable, not just the web server
@@ -66,6 +67,9 @@ The entire AI pipeline runs locally on your machine:
 - **Cross-Encoder Reranking** — Retrieved chunks are rescored by a cross-encoder for higher precision
 - **Query Expansion (HyDE)** — A hypothetical answer is generated and used as a second query, so chunks that match either phrasing are retrieved
 - **Single-Document Design** — One active PDF at a time; uploading a new PDF replaces the previous one
+- **Background Ingestion** — PDF uploads return immediately with a `job_id`; poll `GET /api/ingest/{job_id}` until the job reaches `completed` or `failed`
+- **Docker Compose** — The whole stack (AI service + Ollama + ChromaDB) runs with one command
+- **Test Suite** — 34 pytest tests cover chunking, prompts, citations, PDF validation, reranking, the vector store, the query API, and the ingestion job lifecycle
 
 ---
 
@@ -192,7 +196,7 @@ ai-service/
 │   ├── logging_config.py        # Structured single-line / JSON logging setup
 │   │
 │   ├── routes/
-│   │   ├── ingest.py            # POST /api/ingest — PDF upload endpoint
+│   │   ├── ingest.py            # POST /api/ingest, GET /api/ingest/{job_id} — background PDF upload
 │   │   └── query.py             # POST /api/query — question answering endpoint
 │   │
 │   └── services/
@@ -204,9 +208,16 @@ ai-service/
 │       ├── rerank_service.py    # Stage 5b: Rerank candidates by question–chunk relevance
 │       ├── query_expansion_service.py # Stage 5c: Expand the question with a hypothetical answer
 │       ├── prompt_service.py    # Stage 6: Build the prompt for the LLM
-│       └── llm_service.py       # Stage 7: Send prompt to Ollama, return answer
+│       ├── llm_service.py       # Stage 7: Send prompt to Ollama, return answer
+│       ├── citation_service.py  # Stage 8: Extract [Cite: source | Chunk: index] tags from the answer
+│       └── ingestion_job_service.py # Background ingestion jobs with pollable status
 │
 ├── chroma_data/                 # ChromaDB persisted storage (auto-created)
+├── tests/                       # pytest suite (34 tests, mocks all model downloads)
+├── Dockerfile                   # python:3.12-slim image for the API service
+├── docker-compose.yml           # ai-service + ollama + named volumes
+├── requirements-dev.txt         # Test dependencies (pytest, reportlab, httpx)
+├── .dockerignore                # Keeps venv/.env/chroma_data out of the image
 ├── .env                         # Your local configuration (not committed)
 ├── .env.example                 # Template showing all available config keys
 ├── run.sh                       # One-command launcher (activates venv, starts server)
@@ -242,14 +253,23 @@ A generic handler catches any unexpected errors with status 500.
 
 ### `app/schemas.py`
 Defines the data shapes for API requests and responses:
-- `IngestResponse` — Returned after PDF upload (filename, chunks added, message).
+- `IngestJobResponse` — Returned by `POST /api/ingest` (job_id, filename, status, message).
+- `IngestJobStatus` — Returned by `GET /api/ingest/{job_id}` (job_id, filename, status, chunks_added, error, created_at, updated_at).
 - `QueryRequest` — Incoming question and optional `top_k`.
 - `QueryResponse` — Answer text and list of source chunks.
 - `SourceChunk` — One retrieved chunk: content, source filename, chunk index.
 
 ### `app/routes/ingest.py`
-Handles `POST /api/ingest`. Reads the uploaded file bytes, runs the full ingestion pipeline
-(extract → chunk → embed → store), and returns an `IngestResponse`.
+Handles `POST /api/ingest` and `GET /api/ingest/{job_id}`. The POST validates the upload
+(PDF magic bytes, non-empty text), extracts the text up front so bad PDFs fail fast, then
+creates an `IngestionJob` and runs the chunk → embed → store pipeline in the background,
+returning a `job_id` immediately. The GET endpoint reports the job's current status.
+
+### `app/services/ingestion_job_service.py`
+In-memory registry of background ingestion jobs. Each job moves through `pending` →
+`processing` → `completed`/`failed`, carrying the chunk count or error message. The
+`run_ingestion()` coroutine offloads the blocking pipeline steps to a thread so the event
+loop stays free.
 
 ### `app/routes/query.py`
 Handles `POST /api/query`. Retrieves relevant chunks, builds the prompt, calls Ollama,
@@ -274,7 +294,12 @@ Provides two functions:
 - `embed_query()` — embeds a single question (used during retrieval).
 
 ### `app/services/vectorstore_service.py`
-Manages ChromaDB. On ingestion: clears the entire collection first (single-document design), then adds new chunks with UUID identifiers and metadata (source filename, chunk index). On query: searches for the `top_k` most similar chunks using cosine similarity.
+Manages ChromaDB through the `VectorStore` class, which accepts an injected chromadb client
+(so tests can swap in an in-memory client) and an optional collection name. On ingestion:
+clears the entire collection first (single-document design), then adds new chunks with UUID
+identifiers and metadata (source filename, chunk index). On query: searches for the `top_k`
+most similar chunks using cosine similarity. Module-level functions delegate to a shared
+default instance so existing call sites stay unchanged.
 
 ### `app/services/retrieval_service.py`
 Coordinates retrieval: checks that documents exist, resolves `top_k` (uses config default if not provided or if `<= 0`), expands the question via `query_expansion_service`, embeds each query, fetches extra candidates from the vector store, merges them by best distance, and passes them through the reranker.
@@ -286,13 +311,18 @@ Bridges the gap between the user's phrasing and the document's wording. When `QU
 Rescores the candidate chunks with a cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`) that scores each (question, chunk) pair jointly, then keeps only the `top_k` most relevant. This catches chunks the bi-encoder missed because they only match the question in combination with other words. Falls back to the original retrieval order if the reranker fails, so retrieval never breaks because of reranking. Disabled entirely when `RERANK_ENABLED=false`.
 
 ### `app/services/prompt_service.py`
-Builds the prompt sent to Ollama. Each retrieved chunk is labelled with its source file and chunk index. The LLM is explicitly instructed to answer only from the provided context and to say "I could not find this information in the uploaded documents." if the answer is not present.
+Builds the prompt sent to Ollama. Each retrieved chunk is labelled with its source file and chunk index. The LLM is explicitly instructed to answer only from the provided context, to say "I could not find this information in the uploaded documents." if the answer is not present, and to cite every claim inline with the tag `[Cite: <source> | Chunk: <index>]` using the exact source file and chunk index shown in the context.
 
 ### `app/services/llm_service.py`
 Sends the prompt to Ollama's `POST /api/generate` endpoint with `stream: false` using a shared
 `httpx.AsyncClient` (non-blocking, so the FastAPI event loop is never held up). Also exposes
 `list_models()` for health checks. Raises `OllamaServiceError` if the request fails or the
 response is empty.
+
+### `app/services/citation_service.py`
+Scans the LLM's answer for `[Cite: <source> | Chunk: <index>]` tags with a regex, maps them
+back to the retrieved chunks, and flags each chunk as `cited: true/false`. `filter_cited()`
+returns only the chunks that actually contributed to the answer.
 
 ---
 
@@ -476,7 +506,7 @@ What does the document say about cost reduction?
 Answer:
 ```
 
-**Why it is necessary:** Without explicit instructions, language models use their own knowledge to fill in gaps. The prompt is the contract: the model is told exactly where to look and what to say when the answer is not there.
+**Why it is necessary:** Without explicit instructions, language models use their own knowledge to fill in gaps. The prompt is the contract: the model is told exactly where to look, what to say when the answer is not there, and to cite every claim it makes with the tag `[Cite: <source> | Chunk: <index>]` so the citations can be extracted and verified against the retrieved chunks.
 
 ---
 
@@ -494,7 +524,10 @@ Answer:
 
 ### Stage 8 — Response Assembly (`routes/query.py`)
 
-**What it does:** Returns the answer and the source chunks to the caller.
+**What it does:** Returns the answer and the source chunks to the caller. The answer is
+scanned for `[Cite: <source> | Chunk: <index>]` tags; each retrieved chunk is flagged
+`cited: true` when the answer references it, and the response carries both the full source
+list and a separate `citations` list containing only the chunks that actually contributed.
 
 **Special case:** If Ollama's answer is exactly `"I could not find this information in the uploaded documents."`, the sources list is returned empty. This prevents the API from returning misleading source references when the LLM found nothing useful.
 
@@ -520,7 +553,10 @@ Raw text (cleaned)
 ChromaDB (clears old, stores new) ──── Persisted to disk
   │
   ▼
-IngestResponse { filename, chunks_added, message }
+IngestJobResponse { job_id, filename, status, message }
+  │
+  ▼ client polls GET /api/ingest/{job_id}
+IngestJobStatus { status: processing → completed, chunks_added }
 
 
 Question (POST /api/query)
@@ -591,7 +627,9 @@ Although RAG greatly reduces hallucinations, no language model can guarantee per
 
 ### `POST /api/ingest`
 
-Upload a PDF document.
+Upload a PDF document. The PDF is validated and parsed up front, then the
+chunk → embed → store pipeline runs in the background so large files do not
+hold the request open.
 
 **Request:** `multipart/form-data`
 ```
@@ -601,9 +639,10 @@ file: <PDF file>
 **Response:**
 ```json
 {
+  "job_id": "dd0165d4-8b4d-4259-90f1-5c6c59110def",
   "filename": "report.pdf",
-  "chunks_added": 8,
-  "message": "Document processed and indexed successfully."
+  "status": "pending",
+  "message": "Document accepted for indexing. Poll GET /api/ingest/{job_id} for progress."
 }
 ```
 
@@ -611,6 +650,31 @@ file: <PDF file>
 - `400` — Uploaded file is not a PDF (wrong MIME type or missing `%PDF-` magic bytes).
 - `400` — PDF is corrupted or unreadable.
 - `400` — PDF contains no extractable text (scanned image without text layer).
+
+---
+
+### `GET /api/ingest/{job_id}`
+
+Poll the status of an ingestion job returned by `POST /api/ingest`.
+
+**Response:**
+```json
+{
+  "job_id": "dd0165d4-8b4d-4259-90f1-5c6c59110def",
+  "filename": "report.pdf",
+  "status": "completed",
+  "chunks_added": 8,
+  "error": null,
+  "created_at": 1794738472.10,
+  "updated_at": 1794738477.33
+}
+```
+
+`status` is one of `pending`, `processing`, `completed`, or `failed`. When
+`failed`, the `error` field carries the exception message.
+
+**Errors:**
+- `404` — No ingestion job with that id.
 
 ---
 
@@ -747,6 +811,30 @@ The service starts at: `http://localhost:8000`
 
 Swagger UI (interactive API docs): `http://localhost:8000/docs`
 
+### Running with Docker Compose (recommended)
+
+The whole stack — AI service, Ollama, and the ChromaDB volume — comes up with
+one command. The `ollama-pull` helper service downloads `llama3.2:latest`
+before the API starts, and `ai-service` only launches once Ollama is healthy.
+
+```bash
+docker compose up --build
+```
+
+The API is then available at `http://localhost:8000` (Ollama at `http://localhost:11434`).
+ChromaDB data persists in the `chroma_data` named volume; the Ollama model cache
+persists in `ollama_data`.
+
+### Running the tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -v
+```
+
+The suite mocks the embedding model, cross-encoder, and Ollama, so it runs in
+seconds with no model downloads and no network access.
+
 ---
 
 ## 15. Example Workflow
@@ -756,20 +844,27 @@ Swagger UI (interactive API docs): `http://localhost:8000/docs`
 1. Open `http://localhost:8000/docs`
 2. Click `POST /api/ingest` → `Try it out`
 3. Upload a PDF file
-4. Note the `chunks_added` count in the response
-5. Click `POST /api/query` → `Try it out`
-6. Enter your question:
+4. Note the `job_id` and `status` (`pending`) in the response
+5. Click `GET /api/ingest/{job_id}` → `Try it out`, paste the `job_id`, and
+   execute until `status` becomes `completed` (note the `chunks_added` count)
+6. Click `POST /api/query` → `Try it out`
+7. Enter your question:
    ```json
    { "question": "What are the expected outcomes of this project?" }
    ```
-7. Read the answer and the source chunks it was based on
+8. Read the answer, the `citations` (chunks actually used), and the full `sources` list
 
 ### Using curl
 
 ```bash
-# Upload a PDF
+# Upload a PDF — returns immediately with a job_id
 curl -X POST http://localhost:8000/api/ingest \
   -F "file=@/path/to/your/document.pdf"
+# => {"job_id": "dd0165d4-...", "filename": "document.pdf", "status": "pending", ...}
+
+# Poll the job until it completes
+curl http://localhost:8000/api/ingest/dd0165d4-8b4d-4259-90f1-5c6c59110def
+# => {"status": "completed", "chunks_added": 8, ...}
 
 # Ask a question
 curl -X POST http://localhost:8000/api/query \
@@ -827,17 +922,8 @@ These are not implemented in the current version but are straightforward to add:
 **Multi-document support**
 Remove the collection-clear behavior. Add a `source` filter to ChromaDB queries so each query targets a specific document. Requires tracking which document is active per session or user.
 
-**File type validation**
-Currently any file can be uploaded to `/api/ingest`. Adding a MIME type check (`application/pdf`) would prevent unhelpful errors from non-PDF files.
-
 **Streaming responses**
 Ollama supports streaming generation (`stream: true`). Enabling this would allow the answer to appear word by word in the frontend instead of waiting for the full response.
-
-**Logging**
-Add Python's `logging` module to record ingestion counts, query latency, and errors. Currently the service has no application-level logs.
-
-**Ollama health check**
-The `/health` endpoint only confirms FastAPI is running. Adding an Ollama ping check would give a more accurate health signal for the full system.
 
 **Rate limiting**
 No rate limiting is currently applied. For a production deployment, adding per-IP or per-session limits would prevent abuse.

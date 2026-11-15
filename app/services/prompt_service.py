@@ -20,6 +20,10 @@ If the answer is not in the context, reply exactly:
 
 Do not guess.
 
+When you use a piece of the context, cite it inline right after the claim
+using the tag [Cite: <source> | Chunk: <index>] with the exact source file
+and chunk index shown in the context. Cite every claim you make.
+
 Context:
 {context}
 
