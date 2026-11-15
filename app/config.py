@@ -17,8 +17,12 @@ class Settings(BaseSettings):
     embedding_model: str = "all-MiniLM-L6-v2"
 
     # Chunking
+    chunk_strategy: str = "recursive"  # "recursive" or "semantic"
     chunk_size: int = 500
     chunk_overlap: int = 50
+
+    # Semantic chunking
+    semantic_threshold: float = 0.5  # cosine distance above which a new chunk starts
 
     # Retrieval
     top_k: int = 4

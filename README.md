@@ -49,7 +49,7 @@ The entire AI pipeline runs locally on your machine:
 
 - **PDF Upload** — Upload any text-based PDF via a simple API call
 - **PDF Text Extraction & Cleaning** — Extracts and normalizes text from every page
-- **Intelligent Text Chunking** — Splits documents into overlapping chunks to preserve context
+- **Intelligent Text Chunking** — Splits documents into overlapping chunks to preserve context; optional semantic chunking splits where meaning changes
 - **Local Embedding Generation** — Uses Sentence Transformers (`all-MiniLM-L6-v2`) to convert text to vectors
 - **Semantic Search** — ChromaDB finds the most relevant chunks by meaning, not keywords
 - **Local LLM via Ollama** — Generates answers using `llama3.2:latest` running entirely on your machine
@@ -260,9 +260,10 @@ preserves paragraph breaks, and collapses repeated whitespace.
 Raises `EmptyDocumentError` if no text is found (e.g. scanned image PDFs).
 
 ### `app/services/chunking_service.py`
-Splits the cleaned document text into overlapping chunks using LangChain's `RecursiveCharacterTextSplitter`.
-Default: 500 characters per chunk, 50 character overlap.
-Overlap ensures context is not lost at chunk boundaries.
+Splits the cleaned document text into overlapping chunks. Two strategies are supported, selected by `CHUNK_STRATEGY`:
+
+- **`recursive`** (default): LangChain's `RecursiveCharacterTextSplitter`, which breaks on paragraph boundaries first, then sentences, then words, with a fixed character overlap. Default: 500 characters per chunk, 50 character overlap. Overlap ensures context is not lost at chunk boundaries.
+- **`semantic`**: splits where the meaning of the document actually changes. Each sentence is embedded with the same model used for retrieval, and a new chunk starts when adjacent sentences become too dissimilar (cosine distance above `SEMANTIC_THRESHOLD`), still capped at `chunk_size` characters. This keeps semantically coherent content together instead of cutting it at arbitrary character positions.
 
 ### `app/services/embedding_service.py`
 Loads the `all-MiniLM-L6-v2` model once at startup.
@@ -380,6 +381,7 @@ POST /api/ingest          POST /api/query
 - Uses `RecursiveCharacterTextSplitter` which tries to split on paragraph breaks first, then sentences, then words.
 - Default chunk size: 500 characters.
 - Overlap: 50 characters. This means the last 50 characters of one chunk also appear at the start of the next, preventing loss of context at boundaries.
+- Optional `semantic` strategy (`CHUNK_STRATEGY=semantic`) splits where meaning changes instead: each sentence is embedded, and a new chunk starts when adjacent sentences are too dissimilar (cosine distance above `SEMANTIC_THRESHOLD`), still capped at `chunk_size` characters.
 
 **Why overlap matters — example:**
 
@@ -779,8 +781,10 @@ All values can be set in `.env` or as environment variables.
 | `CHROMA_DIR` | `./chroma_data` | Where ChromaDB stores its files |
 | `COLLECTION_NAME` | `documents` | ChromaDB collection name |
 | `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence Transformers model name |
+| `CHUNK_STRATEGY` | `recursive` | Chunking strategy: `recursive` or `semantic` |
 | `CHUNK_SIZE` | `500` | Max characters per chunk |
 | `CHUNK_OVERLAP` | `50` | Characters shared between adjacent chunks |
+| `SEMANTIC_THRESHOLD` | `0.5` | Cosine distance above which semantic chunking starts a new chunk |
 | `TOP_K` | `4` | Default number of chunks to retrieve |
 | `RERANK_ENABLED` | `true` | Whether to rerank retrieved candidates with a cross-encoder |
 | `RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model used for reranking |
