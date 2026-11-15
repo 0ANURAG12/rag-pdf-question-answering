@@ -59,8 +59,10 @@ The entire AI pipeline runs locally on your machine:
 - **No API Keys Required** — Everything runs locally; no cloud services, no subscriptions
 - **Structured Logging** — Single-line, request-correlated logs on every ingestion and query
 - **Deep Health Check** — `GET /health/deep` verifies Ollama and ChromaDB are reachable, not just the web server
+- **Retry + exponential backoff** — Ollama generation retries twice with doubling backoff before reporting an error
 - **File Validation** — Rejects non-PDF uploads and corrupted PDFs with clear 400 errors
 - **Tightened CORS** — Only origins listed in `ALLOWED_ORIGINS` may call the API
+- **Lazy model loading** — The embedding model (`all-MiniLM-L6-v2`) is loaded on first request, not at server startup
 - **Single-Document Design** — One active PDF at a time; uploading a new PDF replaces the previous one
 
 ---
