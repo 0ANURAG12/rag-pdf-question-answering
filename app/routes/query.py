@@ -30,7 +30,7 @@ async def ask_question(payload: QueryRequest):
         },
     )
 
-    chunks = retrieval_service.retrieve(payload.question, top_k=payload.top_k)
+    chunks = await retrieval_service.retrieve(payload.question, top_k=payload.top_k)
     prompt = prompt_service.build_prompt(payload.question, chunks)
     answer = await llm_service.generate_answer(prompt)
 

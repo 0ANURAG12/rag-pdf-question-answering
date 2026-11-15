@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # Retrieval
     top_k: int = 4
 
+    # Query expansion (HyDE-style hypothetical answer as a second query)
+    query_expansion_enabled: bool = True
+
     # Reranking (cross-encoder over the bi-encoder candidates)
     rerank_enabled: bool = True
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"

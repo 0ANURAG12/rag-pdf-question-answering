@@ -64,6 +64,7 @@ The entire AI pipeline runs locally on your machine:
 - **Tightened CORS** — Only origins listed in `ALLOWED_ORIGINS` may call the API
 - **Lazy model loading** — The embedding model (`all-MiniLM-L6-v2`) is loaded on first request, not at server startup
 - **Cross-Encoder Reranking** — Retrieved chunks are rescored by a cross-encoder for higher precision
+- **Query Expansion (HyDE)** — A hypothetical answer is generated and used as a second query, so chunks that match either phrasing are retrieved
 - **Single-Document Design** — One active PDF at a time; uploading a new PDF replaces the previous one
 
 ---
@@ -201,6 +202,7 @@ ai-service/
 │       ├── vectorstore_service.py # Stage 4: Store and search embeddings in ChromaDB
 │       ├── retrieval_service.py # Stage 5: Find relevant chunks for a question
 │       ├── rerank_service.py    # Stage 5b: Rerank candidates by question–chunk relevance
+│       ├── query_expansion_service.py # Stage 5c: Expand the question with a hypothetical answer
 │       ├── prompt_service.py    # Stage 6: Build the prompt for the LLM
 │       └── llm_service.py       # Stage 7: Send prompt to Ollama, return answer
 │
@@ -275,7 +277,10 @@ Provides two functions:
 Manages ChromaDB. On ingestion: clears the entire collection first (single-document design), then adds new chunks with UUID identifiers and metadata (source filename, chunk index). On query: searches for the `top_k` most similar chunks using cosine similarity.
 
 ### `app/services/retrieval_service.py`
-Coordinates retrieval: checks that documents exist, resolves `top_k` (uses config default if not provided or if `<= 0`), embeds the question, fetches extra candidates from the vector store, and passes them through the reranker.
+Coordinates retrieval: checks that documents exist, resolves `top_k` (uses config default if not provided or if `<= 0`), expands the question via `query_expansion_service`, embeds each query, fetches extra candidates from the vector store, merges them by best distance, and passes them through the reranker.
+
+### `app/services/query_expansion_service.py`
+Bridges the gap between the user's phrasing and the document's wording. When `QUERY_EXPANSION_ENABLED=true`, the LLM writes a hypothetical answer to the question, which is embedded alongside the original question; candidates matching either phrasing are retrieved and merged by best distance. Falls back to the question alone if the LLM is unavailable, so expansion never blocks a query.
 
 ### `app/services/rerank_service.py`
 Rescores the candidate chunks with a cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`) that scores each (question, chunk) pair jointly, then keeps only the `top_k` most relevant. This catches chunks the bi-encoder missed because they only match the question in combination with other words. Falls back to the original retrieval order if the reranker fails, so retrieval never breaks because of reranking. Disabled entirely when `RERANK_ENABLED=false`.
@@ -432,6 +437,8 @@ Both chunks now carry enough context for the retrieval to find them.
 **Why it is necessary:** Sending all chunks to the LLM would be slow and exceed the model's context limit. Retrieval selects only the most relevant pieces.
 
 **top_k:** Controls how many chunks are retrieved. Default is 4 (from config). Can be overridden per request. If the provided value is `<= 0` or not provided, the config default is used.
+
+**Query Expansion:** The user's question is phrased in their own words, which may differ from the wording in the document. To bridge that gap, the LLM writes a hypothetical answer, which is embedded alongside the original question; candidates matching either phrasing are retrieved and merged by best distance. If the LLM is unavailable, expansion is skipped and retrieval uses the question alone.
 
 **Reranking:** Retrieval first fetches more candidates than needed (default 12), then `rerank_service.py` rescores each (question, chunk) pair with a cross-encoder and keeps only the `top_k` most relevant. The bi-encoder used for retrieval encodes the question and each chunk independently, so it can miss chunks that only match the question in combination with other words. The cross-encoder scores them jointly, which is far more accurate — at the cost of speed, which is why it only runs on the small candidate set.
 
@@ -786,6 +793,7 @@ All values can be set in `.env` or as environment variables.
 | `CHUNK_OVERLAP` | `50` | Characters shared between adjacent chunks |
 | `SEMANTIC_THRESHOLD` | `0.5` | Cosine distance above which semantic chunking starts a new chunk |
 | `TOP_K` | `4` | Default number of chunks to retrieve |
+| `QUERY_EXPANSION_ENABLED` | `true` | Whether to add a hypothetical answer as a second retrieval query |
 | `RERANK_ENABLED` | `true` | Whether to rerank retrieved candidates with a cross-encoder |
 | `RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model used for reranking |
 | `RERANK_CANDIDATES` | `12` | Number of candidates retrieved before reranking |
